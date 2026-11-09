@@ -1,0 +1,151 @@
+use 'zinc-json' as json
+
+pub struct Response [
+    pub bool ok
+    pub int status
+    pub str body
+    pub str error
+    pub int retry_ms
+    pub int reset_ms
+    pub int remaining
+    pub str bucket
+    pub bool global
+]
+
+pub struct Transfer [
+    pub bool ready
+    pub Response response
+]
+
+pub struct Frame [
+    pub bool ok
+    pub str kind
+    pub str data
+    pub int code
+    pub str error
+]
+
+fn field_text [str source, str key] str [
+    json.Text raw = json.member source, key
+    json.Text text = json.text raw.value
+    = text.value
+]
+
+fn field_int [str source, str key, int fallback] int [
+    json.Text raw = json.member source, key
+    json.Integer number = json.unsigned_int raw.value
+    if [not number.ok] [ = fallback ]
+    = number.value
+]
+
+fn success [str source] bool [
+    json.Text ok = json.member source, 'ok'
+    = ok.ok and str.eq ok.value, 'true'
+]
+
+fn call_number [str operation, str arg] json.Integer [
+    str raw = net.call operation, arg, '', '', ''
+    if [not success raw] [ = json.Integer [false, 0] ]
+    int number = field_int raw, 'value', [0 sub 1]
+    = json.Integer [number ge 0, number]
+]
+
+pub fn http [str url, str method, str authorization, str body] Response [
+    str raw = net.call 'http', url, method, authorization, body
+    = decode_response raw
+]
+
+fn decode_response [str raw] Response [
+    if [not success raw] [
+        str error = field_text raw, 'error'
+        if [str.len error eq 0] [ error = 'invalid native HTTP response' ]
+        = Response [false, 0, '', error, 0, 0, 0, '', false]
+    ]
+    int status = field_int raw, 'status', 0
+    str data = field_text raw, 'body'
+    int retry = field_int raw, 'retry_ms', [0 sub 1]
+    int reset = field_int raw, 'reset_ms', [0 sub 1]
+    int remaining = field_int raw, 'remaining', [0 sub 1]
+    str bucket = field_text raw, 'bucket'
+    json.Text global = json.member raw, 'global'
+    bool is_global = str.eq global.value, 'true'
+    = Response [true, status, data, '', retry, reset, remaining, bucket, is_global]
+]
+
+pub fn http_start [str url, str method, str authorization, str body] json.Integer [
+    str raw = net.call 'http_start', url, method, authorization, body
+    if [not success raw] [ = json.Integer [false, 0] ]
+    int handle = field_int raw, 'value', 0
+    = json.Integer [handle gt 0, handle]
+]
+
+pub fn http_poll [int handle] Transfer [
+    str raw = net.call 'http_poll', [int.str handle], '', '', ''
+    str kind = field_text raw, 'kind'
+    bool pending = str.eq kind, 'pending'
+    Response response = Response [false, 0, '', '', 0, 0, 0, '', false]
+    if [not pending] [ response = decode_response raw ]
+    = Transfer [not pending, response]
+]
+
+pub fn http_start_timed [str url, str method, str authorization, str body, int budget_ms] json.Integer [
+    if [budget_ms lt 1 or budget_ms gt 15000] [ = json.Integer [false, 0] ]
+    str operation = str.concat 'http_start_timed:', int.str budget_ms
+    str raw = net.call operation, url, method, authorization, body
+    if [not success raw] [ = json.Integer [false, 0] ]
+    int handle = field_int raw, 'value', 0
+    = json.Integer [handle gt 0, handle]
+]
+
+pub fn http_cancel [int handle] bool [
+    json.Integer canceled = call_number 'http_cancel', int.str handle
+    = canceled.ok
+]
+
+pub fn ws_open [str url] json.Integer [ = call_number 'ws_open', url ]
+
+pub fn websocket_supported [] bool [
+    str raw = net.call 'capabilities', '', '', '', ''
+    json.Text wss = json.member raw, 'wss'
+    = success raw and str.eq wss.value, 'true'
+]
+
+pub fn ws_send [int handle, str text] bool [
+    str raw = net.call 'ws_send', [int.str handle], text, '', ''
+    = success raw
+]
+
+pub fn ws_receive [int handle, int timeout_ms] Frame [
+    str raw = net.call 'ws_receive', [int.str handle], [int.str timeout_ms], '', ''
+    if [not success raw] [
+        str error = field_text raw, 'error'
+        if [str.len error eq 0] [ error = 'invalid native WebSocket response' ]
+        = Frame [false, 'error', '', 0, error]
+    ]
+    str kind = field_text raw, 'kind'
+    str data = field_text raw, 'data'
+    int code = field_int raw, 'code', 0
+    = Frame [true, kind, data, code, '']
+]
+
+pub fn ws_close [int handle] bool [
+    json.Integer result = call_number 'ws_close', int.str handle
+    = result.ok
+]
+
+pub fn clock_ms [] json.Integer [ = call_number 'clock', '' ]
+pub fn seconds_ms [str seconds] json.Integer [
+    if [not str.eq [json.kind seconds], 'number'] [ = json.Integer [false, 0] ]
+    = call_number 'milliseconds', seconds
+]
+pub fn random [int upper_exclusive] json.Integer [ = call_number 'random', int.str upper_exclusive ]
+pub fn sleep_ms [int milliseconds] bool [
+    json.Integer result = call_number 'sleep', int.str milliseconds
+    = result.ok
+]
+
+# Native clock wraps every 1,000,000,000 ms. Compare at least once per wrap.
+pub fn elapsed [int start, int end] int [
+    if [end ge start] [ = end sub start ]
+    = 1000000000 sub start add end
+]
